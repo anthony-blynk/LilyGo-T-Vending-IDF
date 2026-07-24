@@ -1,0 +1,6 @@
+{
+    "idf.currentSetup": "C:\\esp\\v6.0.2\\esp-idf",
+    "zephyr-tools.paths.sdkInstallDir": "C:\\Users\\ant\\.zephyrtools\\toolchain\\zephyr-sdk-0.16.4",
+    "idf.flashType": "UART",
+    "idf.portWin": "COM16"
+}

@@ -1,0 +1,6 @@
+# LilyGo T-Vending: ESP32-S3, 16MB flash, 8MB octal PSRAM (unused by this app today).
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# No OTA, large app partition — equivalent of the Arduino core's huge_app.csv.
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y

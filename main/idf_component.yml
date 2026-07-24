@@ -1,0 +1,4 @@
+dependencies:
+  idf: ">=5.0"
+  espressif/esp-modbus: "^2"
+  espressif/mqtt: "*"
