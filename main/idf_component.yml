@@ -2,3 +2,5 @@ dependencies:
   idf: ">=5.0"
   espressif/esp-modbus: "^2"
   espressif/mqtt: "*"
+  espressif/esp_modem: "^2"
+  espressif/cjson: "^1.7.19"

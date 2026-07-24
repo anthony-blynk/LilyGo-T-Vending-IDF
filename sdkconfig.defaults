@@ -2,5 +2,16 @@
 CONFIG_IDF_TARGET="esp32s3"
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 
-# No OTA, large app partition — equivalent of the Arduino core's huge_app.csv.
-CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+# Two-OTA-slot layout (partitions.csv) + rollback safety — needed for the
+# Blynk MQTT Device API's OTA support (blynk_mqtt.c). Replaces the previous
+# single-large-app, no-OTA partition table.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# Cellular debugging: dump raw AT command traffic on the modem UART
+# (tags "uart-tx"/"uart-rx", enabled at runtime in net_manager.c). Requires
+# raising the compile-time log ceiling since the dump uses ESP_LOG_DEBUG.
+CONFIG_ESP_MODEM_ADD_DEBUG_LOGS=y
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y

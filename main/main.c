@@ -1,6 +1,13 @@
 /*
  *******************************************************************************
- * T-Vending — Modbus to MQTT to Blynk over WiFi
+ * T-Vending — Modbus to MQTT to Blynk over WiFi/cellular
+ *
+ * Blynk's MQTT Device API (info/mcu, ping, reboot, redirect, OTA, datastream
+ * downlink) lives in blynk_mqtt.c/.h, ported from the T-SIM7600E-Blynk-IDF
+ * project's module of the same shape (itself ported from blynk_p4_mqtt).
+ * The relay is driven via the generic "Relay" datastream, through
+ * blynk_mqtt_set_ds_handler() below, instead of a hardcoded relay-only
+ * MQTT topic subscription.
  *******************************************************************************
  */
 #include <stdio.h>
@@ -17,10 +24,10 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "mbcontroller.h"
-#include "mqtt_client.h"
 #include "nvs_flash.h"
 
 #include "app_config.h"
+#include "blynk_mqtt.h"
 #include "net_manager.h"
 
 #define FIRMWARE_BUILD_DATE __DATE__ " " __TIME__
@@ -34,23 +41,11 @@
 
 static const char *TAG = "t_vending";
 
-static esp_mqtt_client_handle_t s_mqtt_client;
 static void *s_mb_master_handle;
 
-static volatile bool s_mqtt_connected = false;
-static uint32_t s_mqtt_fail_count = 0;
 static uint32_t s_reconnect_count = 0;
 static uint32_t s_wifi_reset_count = 0;
 static bool s_relay_state = false;
-
-static void mqtt_publish_info(void)
-{
-    char info[128];
-    snprintf(info, sizeof(info),
-             "{\"tmpl\":\"%s\",\"ver\":\"%s\",\"build\":\"%s\"}",
-             BLYNK_TEMPLATE_ID, FIRMWARE_VERSION, FIRMWARE_BUILD_DATE);
-    esp_mqtt_client_publish(s_mqtt_client, BLYNK_INFO_TOPIC, info, 0, 0, 0);
-}
 
 static bool set_modbus_relay_state(bool turn_on)
 {
@@ -113,86 +108,32 @@ static void poll_sensor_and_publish(void)
         snprintf(payload, sizeof(payload),
                  "{\"Temperature\":%.1f,\"Humidity\":%.1f,\"Reconnects\":%lu,\"WifiResets\":%lu}",
                  temperature, humidity, (unsigned long)s_reconnect_count, (unsigned long)s_wifi_reset_count);
-        esp_mqtt_client_publish(s_mqtt_client, BLYNK_BATCH_TOPIC, payload, 0, 0, 0);
+        blynk_mqtt_publish(BLYNK_BATCH_TOPIC, payload);
     } else {
         ESP_LOGW(TAG, "Modbus error: %s", esp_err_to_name(err));
     }
 }
 
-static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
+// Drives the real RS485 relay off the generic "Relay" datastream downlink —
+// replaces the old hardcoded BLYNK_RELAY_TOPIC subscription now that
+// blynk_mqtt.c handles all datastream downlinks generically.
+static void on_datastream(const char *ds_name, const char *payload)
 {
-    (void)handler_args;
-    (void)base;
-    esp_mqtt_event_handle_t event = (esp_mqtt_event_handle_t)event_data;
-
-    switch ((esp_mqtt_event_id_t)event_id) {
-    case MQTT_EVENT_CONNECTED:
-        ESP_LOGI(TAG, "MQTT CONNECTED  FW:%s", FIRMWARE_VERSION);
-        s_mqtt_connected = true;
-        s_mqtt_fail_count = 0;
-        s_reconnect_count++;
-        mqtt_publish_info();
-        esp_mqtt_client_subscribe(s_mqtt_client, BLYNK_RELAY_TOPIC, 0);
-        esp_mqtt_client_subscribe(s_mqtt_client, "downlink/reboot", 0);
-        esp_mqtt_client_subscribe(s_mqtt_client, "downlink/ping", 1); // QoS 1 — broker expects PUBACK, sent automatically
-        break;
-
-    case MQTT_EVENT_DISCONNECTED:
-        s_mqtt_connected = false;
-        ESP_LOGW(TAG, "MQTT NOT CONNECTED");
-        if (++s_mqtt_fail_count >= 3) {
-            s_mqtt_fail_count = 0;
-            s_wifi_reset_count++;
-            ESP_LOGW(TAG, "WiFi reset #%lu...", (unsigned long)s_wifi_reset_count);
-            net_manager_reset();
-        }
-        break;
-
-    case MQTT_EVENT_DATA: {
-        int topic_len = event->topic_len < 127 ? event->topic_len : 127;
-        int data_len = event->data_len < 199 ? event->data_len : 199;
-        char topic[128];
-        char data[200];
-        memcpy(topic, event->topic, topic_len);
-        topic[topic_len] = '\0';
-        memcpy(data, event->data, data_len);
-        data[data_len] = '\0';
-        ESP_LOGI(TAG, "MQTT <<< [%s] %s", topic, data);
-
-        if (strcmp(topic, "downlink/ping") == 0) {
-            ESP_LOGI(TAG, "PING received — PUBACK sent automatically");
-            break;
-        }
-        if (strcmp(topic, "downlink/reboot") == 0) {
-            ESP_LOGW(TAG, "Reboot requested via Blynk — restarting...");
-            vTaskDelay(pdMS_TO_TICKS(500));
-            esp_restart();
-        }
-        if (strcmp(topic, BLYNK_RELAY_TOPIC) == 0) {
-            bool on = (strcmp(data, "true") == 0 || strcmp(data, "1") == 0);
-            s_relay_state = on;
-            set_modbus_relay_state(on);
-        }
-        break;
-    }
-
-    default:
-        break;
+    if (strcmp(ds_name, "Relay") == 0) {
+        bool on = (strcmp(payload, "true") == 0 || strcmp(payload, "1") == 0);
+        s_relay_state = on;
+        set_modbus_relay_state(on);
     }
 }
 
-static void mqtt_init(void)
+static void on_mqtt_connected(void)
 {
-    esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = MQTT_BROKER_URI,
-        .credentials.client_id = MQTT_DEVICE_ID,
-        .credentials.username = MQTT_PUB_ID,
-        .credentials.authentication.password = MQTT_PASSWORD,
-        .session.keepalive = 60,
-        .network.timeout_ms = 15000,
-    };
-    s_mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
-    esp_mqtt_client_register_event(s_mqtt_client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
+    s_reconnect_count++;
+}
+
+static void on_mqtt_network_reset(void)
+{
+    s_wifi_reset_count++;
 }
 
 static esp_err_t modbus_master_init(void)
@@ -234,23 +175,6 @@ static esp_err_t modbus_master_init(void)
     return ESP_OK;
 }
 
-static void on_net_ready(void)
-{
-    ESP_LOGI(TAG, "Network ready, starting MQTT client");
-    esp_mqtt_client_start(s_mqtt_client);
-}
-
-static void on_net_changed(void)
-{
-    // Only fires once a second interface (cellular) exists to fail over to.
-    // Per NETWORK_FAILOVER_NOTES.md Gotcha 4: esp_mqtt_client_reconnect() is a
-    // no-op unless the client is already MQTT_STATE_WAIT_RECONNECT, so a
-    // healthy CONNECTED client must be force-dropped with disconnect() instead
-    // — auto-reconnect (enabled by default) then re-establishes it.
-    ESP_LOGI(TAG, "Active network interface changed, forcing MQTT reconnect");
-    esp_mqtt_client_disconnect(s_mqtt_client);
-}
-
 void app_main(void)
 {
     ESP_LOGI(TAG, ">>T-Vending  FW:%s  Built:%s", FIRMWARE_VERSION, FIRMWARE_BUILD_DATE);
@@ -261,6 +185,12 @@ void app_main(void)
         nvs_err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(nvs_err);
+
+    // Before any network bring-up: if this is an unconfirmed OTA image,
+    // arm the confirm-or-rollback watchdog so a bad update that never
+    // reaches MQTT reverts on its own instead of hanging forever.
+    blynk_mqtt_arm_ota_watchdog();
+
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
@@ -272,15 +202,18 @@ void app_main(void)
     gpio_set_level(BOARD_POWER_ON, 1); // power up RS485 transceiver
     gpio_set_level(BOARD_485_EN, 0);   // transceiver auto-directions, keep enabled
 
-    mqtt_init();
+    blynk_mqtt_set_ds_handler(on_datastream);
+    blynk_mqtt_set_on_connected(on_mqtt_connected);
+    blynk_mqtt_set_on_network_reset(on_mqtt_network_reset);
+
     ESP_ERROR_CHECK(modbus_master_init());
-    net_manager_init(on_net_ready, on_net_changed);
+    net_manager_init(blynk_mqtt_start, blynk_mqtt_reconnect);
 
     int64_t poll_at_ms = (esp_timer_get_time() / 1000) + 10000; // give XY-MD02 10s to finish startup
     while (1) {
         int64_t now_ms = esp_timer_get_time() / 1000;
         if (now_ms >= poll_at_ms) {
-            if (s_mqtt_connected) {
+            if (blynk_mqtt_is_connected()) {
                 poll_sensor_and_publish();
                 poll_at_ms = now_ms + UPLOAD_INTERVAL_MS;
             } else {

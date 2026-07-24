@@ -1,0 +1,10 @@
+# Name,   Type, SubType, Offset,  Size, Flags
+# Two-OTA-slot layout (no separate factory partition) — required for
+# esp_https_ota() to have anywhere to write an update. This board has 16MB
+# flash, so 4MB per OTA slot leaves generous headroom for growth (current
+# binary is ~1MB) while still leaving ~8MB unused/reserved.
+nvs,      data, nvs,     0x9000,  0x6000,
+otadata,  data, ota,     0xf000,  0x2000,
+phy_init, data, phy,     0x11000, 0x1000,
+ota_0,    app,  ota_0,   0x20000, 4M,
+ota_1,    app,  ota_1,   ,        4M,
